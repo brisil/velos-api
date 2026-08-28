@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: velos-db
+    environment:
+      POSTGRES_DB: velos
+      POSTGRES_USER: velo_user
+      POSTGRES_PASSWORD: velo_password_secret
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U velo_user -d velos"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    container_name: velos-api
+    ports:
+      - "8001:8000"
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: velos
+      DB_USER: velo_user
+      DB_PASSWORD: velo_password_secret
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
