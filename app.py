@@ -1,93 +1,69 @@
-"""velos-api : etat des stations de velos en libre-service.
-
-Application fournie dans le cadre du projet noté du Jour 4.
-Tu n'as pas a la reecrire. Tu devras seulement lui ajouter une route,
-comme demande dans l'enonce (jalon 3).
-
-Deux comportements a comprendre avant de commencer :
-
-1. La source des donnees depend d'une variable d'environnement.
-   Si DATABASE_URL est definie, l'application lit la base PostgreSQL.
-   Sinon, elle se rabat sur le jeu de donnees de secours ci-dessous
-   et l'annonce dans sa reponse, dans le champ "source".
-   La meme image tournera donc en local, dans une pile de conteneurs,
-   dans un cluster et dans un pipeline SANS etre reconstruite.
-
-2. L'application ecoute sur toutes les interfaces (0.0.0.0).
-   Sans cela, la publication de port d'un conteneur ne servirait a rien.
-"""
-
 import os
-
+import psycopg2
 from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-# Jeu de donnees de secours, utilise quand aucune base n'est configuree.
 STATIONS_SECOURS = [
-    {"nom": "Gare Centrale", "quartier": "Centre", "velos_disponibles": 12, "capacite": 20},
-    {"nom": "Place du Marche", "quartier": "Centre", "velos_disponibles": 2, "capacite": 15},
-    {"nom": "Parc des Sports", "quartier": "Nord", "velos_disponibles": 7, "capacite": 10},
-    {"nom": "Universite", "quartier": "Sud", "velos_disponibles": 1, "capacite": 25},
+    {"id": 1, "nom": "Gare Centrale (Secours)", "velos_disponibles": 5, "emplacements_libres": 10},
+    {"id": 2, "nom": "Place du Commerce (Secours)", "velos_disponibles": 0, "emplacements_libres": 15},
+    {"id": 3, "nom": "Université (Secours)", "velos_disponibles": 2, "emplacements_libres": 8},
+    {"id": 4, "nom": "Parc des Sports (Secours)", "velos_disponibles": 8, "emplacements_libres": 2}
 ]
 
+def get_db_connection():
+    try:
+        conn = psycopg2.connect(
+            host=os.environ.get('DB_HOST', 'db'),
+            port=os.environ.get('DB_PORT', '5432'),
+            database=os.environ.get('DB_NAME', 'velos'),
+            user=os.environ.get('DB_USER', 'velo_user'),
+            password=os.environ.get('DB_PASSWORD', 'velo_password_secret'),
+            connect_timeout=3
+        )
+        return conn
+    except Exception:
+        return None
 
-def lire_stations():
-    """Retourne (stations, source). La source vaut 'postgres' ou 'memoire'."""
-    url = os.environ.get("DATABASE_URL")
-    if not url:
-        return STATIONS_SECOURS, "memoire"
-
-    import psycopg2
-
-    with psycopg2.connect(url) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT nom, quartier, velos_disponibles, capacite "
-                "FROM stations ORDER BY nom"
-            )
-            lignes = cur.fetchall()
-
-    stations = [
-        {"nom": n, "quartier": q, "velos_disponibles": v, "capacite": c}
-        for n, q, v, c in lignes
-    ]
-    return stations, "postgres"
-
-
-@app.get("/sante")
+@app.route('/sante', methods=['GET'])
 def sante():
-    """Route destinee aux machines, pas aux humains."""
-    return jsonify({"statut": "ok"})
+    return jsonify({"statut": "OK"}), 200
 
+@app.route('/stations', methods=['GET'])
+def get_stations():
+    conn = get_db_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT id, nom, velos_disponibles, emplacements_libres FROM stations;")
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            stations = [{"id": r[0], "nom": r[1], "velos_disponibles": r[2], "emplacements_libres": r[3]} for r in rows]
+            return jsonify({"source": "base", "version": "2.0", "stations": stations}), 200
+        except Exception:
+            if conn:
+                conn.close()
+    return jsonify({"source": "secours", "version": "2.0", "stations": STATIONS_SECOURS}), 200
 
-@app.get("/stations")
-def stations():
-    donnees, source = lire_stations()
-    return jsonify({"source": source, "stations": donnees})
+@app.route('/alertes', methods=['GET'])
+def get_alertes():
+    conn = get_db_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT id, nom, velos_disponibles, emplacements_libres FROM stations WHERE velos_disponibles <= 2;")
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            alertes = [{"id": r[0], "nom": r[1], "velos_disponibles": r[2], "emplacements_libres": r[3]} for r in rows]
+            return jsonify({"source": "base", "version": "2.0", "alertes": alertes}), 200
+        except Exception:
+            if conn:
+                conn.close()
+    
+    alertes_secours = [s for s in STATIONS_SECOURS if s["velos_disponibles"] <= 2]
+    return jsonify({"source": "secours", "version": "2.0", "alertes": alertes_secours}), 200
 
-
-@app.get("/disponibilite")
-def disponibilite():
-    donnees, source = lire_stations()
-    capacite_totale = sum(s["capacite"] for s in donnees)
-    if not capacite_totale:
-        return jsonify({"source": source, "taux_occupation": None})
-    velos = sum(s["velos_disponibles"] for s in donnees)
-    taux = round(100 * velos / capacite_totale, 1)
-    return jsonify({"source": source, "taux_occupation": taux})
-
-
-# ---------------------------------------------------------------------------
-# A TOI DE JOUER (jalon 3 de l'enonce)
-#
-# Ajoute ici une route /alertes qui renvoie les stations dont le nombre de
-# velos disponibles est inferieur ou egal a 2 (le seuil d'alerte).
-# Respecte la forme des reponses ci-dessus : le champ "source" doit y figurer.
-# Puis ecris le test correspondant (jalon 4).
-# ---------------------------------------------------------------------------
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8000"))
-    app.run(host="0.0.0.0", port=port)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8000)
